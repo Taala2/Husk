@@ -33,14 +33,15 @@ diff --git a/src/translation-layer-next/husk-tl-bionic.c b/src/translation-layer
 index 072fdf9..482fc49 100644
 --- a/src/translation-layer-next/husk-tl-bionic.c
 +++ b/src/translation-layer-next/husk-tl-bionic.c
-@@ -441,6 +441,15 @@ static void bionic_exit(int status)
+@@ -441,6 +441,16 @@ static void bionic_exit(int status)
      char where[200];
      describe_caller(__builtin_return_address(0), where, sizeof(where));
      tl_log_line("bionic: exit(%d) called from %s", status, where);
 +    if (status != 0) {
 +        /* what a Python app (Ren'Py, Kivy) was told about where it lives: its paths decide where it looks for its own files */
 +        static const char *const names[] = { "ANDROID_APK", "ANDROID_PRIVATE", "ANDROID_PUBLIC", "ANDROID_OLD_PUBLIC", "ANDROID_ARGUMENT",
-+                                             "ANDROID_ENTRYPOINT", "ANDROID_UNPACK", "ANDROID_EXPANSION", "PYTHONHOME", "PYTHONPATH" };
++                                             "ANDROID_ENTRYPOINT", "ANDROID_UNPACK", "ANDROID_EXPANSION", "PYTHONHOME", "PYTHONPATH",
++                                             "ANDROID_PACK_FF1", "ANDROID_PACK_FF2", "ANDROID_PACK_FF3", "ANDROID_PACK_FF4" };
 +        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 +            const char *v = getenv(names[i]);
 +            if (v) tl_log_line("bionic: env %s=%s", names[i], v);
