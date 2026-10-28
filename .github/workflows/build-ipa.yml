@@ -14,7 +14,8 @@ jobs:
           if [ -f husk-renpy-fix.patch ]; then git apply husk-renpy-fix.patch; fi
       - name: Tools
         run: |
-          brew install meson ninja pkg-config xcodegen qemu python@3.12 || true
+          brew install meson ninja pkg-config xcodegen qemu python@3.12
+          /opt/homebrew/bin/python3 -m pip install --break-system-packages PyYAML
           rustup target add aarch64-apple-ios
       - name: Build
         run: ./scripts/ci_build.sh build/Husk.ipa
