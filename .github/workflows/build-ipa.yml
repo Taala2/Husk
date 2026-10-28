@@ -1,5 +1,4 @@
-# Сборка Husk.ipa на GitHub вместо Mac. Положить в .github/workflows/build-ipa.yml своего форка.
-# Не проверялось: Husk собирается с нуля 2+ часа (QEMU, ANGLE, MoltenVK), лимит задачи на GitHub 6 часов.
+# Сборка Husk.ipa на GitHub вместо Mac (ваша версия + шаг с java-runtime).
 name: Build Husk IPA
 on:
   workflow_dispatch:
@@ -17,8 +16,26 @@ jobs:
           brew install meson ninja pkg-config xcodegen qemu python@3.12
           /opt/homebrew/bin/python3 -m pip install --break-system-packages PyYAML
           rustup target add aarch64-apple-ios
+      # build_java_runtime.sh берёт файлы из образа Android на личном диске автора (/Volumes/GTAV/...), в CI их нет.
+      # package_ipa.sh молча пропускает папку, если build/java-runtime нет, и игры не стартуют ("no java/lang/Object").
+      # Берём готовую java-runtime из официального релиза Husk.
+      - name: Java runtime from the official release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/rel && cd /tmp/rel
+          gh release download --repo Leviidev/Husk --pattern 'Husk.ipa' --clobber
+          unzip -q Husk.ipa 'Payload/Husk.app/java-runtime/*'
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          rm -rf "$GITHUB_WORKSPACE/build/java-runtime"
+          cp -R Payload/Husk.app/java-runtime "$GITHUB_WORKSPACE/build/java-runtime"
+          test -f "$GITHUB_WORKSPACE/build/java-runtime/husk-framework.dex"
+          du -sh "$GITHUB_WORKSPACE/build/java-runtime"
       - name: Build
         run: ./scripts/ci_build.sh build/Husk.ipa
+      - name: Check the IPA carries the Java runtime
+        run: |
+          unzip -l build/Husk.ipa | grep -c "java-runtime/com.android.art/javalib/core-oj.jar"
       - uses: actions/upload-artifact@v4
         with:
           name: Husk-ipa
