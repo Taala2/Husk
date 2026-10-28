@@ -1,0 +1,24 @@
+# Сборка Husk.ipa на GitHub вместо Mac. Положить в .github/workflows/build-ipa.yml своего форка.
+# Не проверялось: Husk собирается с нуля 2+ часа (QEMU, ANGLE, MoltenVK), лимит задачи на GitHub 6 часов.
+name: Build Husk IPA
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch (если файл husk-renpy-fix.patch лежит в корне репозитория)
+        run: |
+          if [ -f husk-renpy-fix.patch ]; then git apply husk-renpy-fix.patch; fi
+      - name: Tools
+        run: |
+          brew install meson ninja pkg-config xcodegen qemu python@3.12 || true
+          rustup target add aarch64-apple-ios
+      - name: Build
+        run: ./scripts/ci_build.sh build/Husk.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Husk-ipa
+          path: build/Husk.ipa
