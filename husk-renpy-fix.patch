@@ -1,0 +1,103 @@
+diff --git a/src/app/Husk/AppDiagnosis.swift b/src/app/Husk/AppDiagnosis.swift
+index 1b345aa..e3cf7f1 100644
+--- a/src/app/Husk/AppDiagnosis.swift
++++ b/src/app/Husk/AppDiagnosis.swift
+@@ -130,6 +130,26 @@ struct AppDiagnosis: Identifiable, Equatable {
+                                 detail: "It stopped with \(signal). The report has the full log of the run.", evidence: head)
+         }
+ 
++        // A Python app (Ren'Py, Kivy, pygame) that ended on an error of its own script. Python prints the traceback and then calls
++        // exit(1), which looks exactly like a protected app closing itself, so this is checked first. The traceback is the run of
++        // "I/python:" lines right before the exit; its first error is the cause (a later one is only what failed while reporting it).
++        if let ei = lines.lastIndex(where: { $0.contains("bionic: exit(") && $0.contains("called from") }) {
++            var start = ei
++            while start > 0 && lines[start - 1].hasPrefix("I/python:") { start -= 1 }
++            let block = lines[start..<ei].map { String($0.dropFirst("I/python:".count)).trimmingCharacters(in: .whitespaces) }
++            let cause = block.first { l in
++                guard !l.hasPrefix("File "), let c = l.firstIndex(of: ":") else { return false }
++                let name = l[..<c]
++                return !name.contains(" ") && (name.hasSuffix("Error") || name.hasSuffix("Exception"))
++            }
++            if let cause, block.contains(where: { $0.hasPrefix("Traceback") || $0.hasPrefix("Full traceback") }) {
++                return AppDiagnosis(kind: .javaCrash, title: "The game stopped on a script error",
++                                    detail: "The game's own Python code failed: \(cause.prefix(220)). This is not copy protection: the game did not find "
++                                        + "what it expects in the Android environment Husk gives it. The report has the full log.",
++                                    evidence: lines[start])
++            }
++        }
++
+         // The app ended itself from native code: protection that found it is not on a certified phone, most of the time
+         if let l = lines.last(where: { $0.contains("bionic: exit(") && $0.contains("called from") }),
+            let code = l.range(of: "exit\\((\\d+)\\)", options: .regularExpression).map({ String(l[$0]) }), code != "exit(0)" {
+diff --git a/src/translation-layer-next/husk-tl-bionic.c b/src/translation-layer-next/husk-tl-bionic.c
+index 072fdf9..482fc49 100644
+--- a/src/translation-layer-next/husk-tl-bionic.c
++++ b/src/translation-layer-next/husk-tl-bionic.c
+@@ -441,6 +441,15 @@ static void bionic_exit(int status)
+     char where[200];
+     describe_caller(__builtin_return_address(0), where, sizeof(where));
+     tl_log_line("bionic: exit(%d) called from %s", status, where);
++    if (status != 0) {
++        /* what a Python app (Ren'Py, Kivy) was told about where it lives: its paths decide where it looks for its own files */
++        static const char *const names[] = { "ANDROID_APK", "ANDROID_PRIVATE", "ANDROID_PUBLIC", "ANDROID_OLD_PUBLIC", "ANDROID_ARGUMENT",
++                                             "ANDROID_ENTRYPOINT", "ANDROID_UNPACK", "ANDROID_EXPANSION", "PYTHONHOME", "PYTHONPATH" };
++        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++            const char *v = getenv(names[i]);
++            if (v) tl_log_line("bionic: env %s=%s", names[i], v);
++        }
++    }
+     log_guest_frames(__builtin_frame_address(1));
+     if (tl_guest_exit_hook) tl_guest_exit_hook(status);
+     exit(status);
+diff --git a/src/translation-layer-next/husk-tl-unity-app.c b/src/translation-layer-next/husk-tl-unity-app.c
+index b0ce536..7eeda1e 100644
+--- a/src/translation-layer-next/husk-tl-unity-app.c
++++ b/src/translation-layer-next/husk-tl-unity-app.c
+@@ -13,6 +13,7 @@
+ #include <string.h>
+ #include <time.h>
+ #include <sys/ucontext.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ #include <TargetConditionals.h>
+ #if TARGET_OS_IPHONE
+@@ -248,6 +249,16 @@ static bool manifest_launcher_activity(const char *apk, const char *package, cha
+  * natives. Java recursion is C recursion in the interpreter, and class initialisation runs deep, so this runs on its own
+  * thread with a big stack rather than on the launch thread.
+  */
++/* A Ren'Py game (or any Python game built on its SDL activity): the APK carries librenpython.so. */
++static bool apk_is_python_game(const char *apk)
++{
++    tl_zip z; char err[160];
++    if (!tl_zip_open(&z, apk, err, sizeof(err))) return false;
++    bool yes = tl_zip_find(&z, "lib/arm64-v8a/librenpython.so") != NULL;
++    tl_zip_close(&z);
++    return yes;
++}
++
+ static void *java_boot(void *arg)
+ {
+     bool *ok = arg;
+@@ -338,6 +349,22 @@ static void *launch_thread(void *arg)
+         tl_audio_install();
+         ok = tl_gm_start(&cfg) && tl_gm_run();
+     } else if (A.engine == ENGINE_JAVA) {
++        if (apk_is_python_game(A.apk)) {
++            /* Python looks for its files by comparing path strings, and a path on iOS can be spelled two ways (/var/mobile/... and
++               /private/var/mobile/..., one folder through a symbolic link) where on Android there is one. Hand the game one spelling
++               of both its APK and its data folder, and log the file operations of the run, so a report shows what it opened. */
++            setenv("TL_FILE_TRACE", "1", 0);
++            char rp[1024];
++            mkdir(A.data, 0755);
++            if (realpath(A.apk, rp)) {
++                if (strcmp(rp, A.apk)) tl_log_line("python: apk path %s -> %s", A.apk, rp);
++                snprintf(A.apk, sizeof(A.apk), "%s", rp);
++            }
++            if (realpath(A.data, rp)) {
++                if (strcmp(rp, A.data)) tl_log_line("python: data path %s -> %s", A.data, rp);
++                snprintf(A.data, sizeof(A.data), "%s", rp);
++            }
++        }
+         tl_log_line("java: starting %s as %s, %dx%d (runtime %s)", A.apk, A.package, A.width, A.height, g_java_root);
+         ok = false;
+         if (g_java_root[0]) {
