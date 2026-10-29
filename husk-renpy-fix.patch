@@ -33,15 +33,14 @@ diff --git a/src/translation-layer-next/husk-tl-bionic.c b/src/translation-layer
 index 072fdf9..482fc49 100644
 --- a/src/translation-layer-next/husk-tl-bionic.c
 +++ b/src/translation-layer-next/husk-tl-bionic.c
-@@ -441,6 +441,16 @@ static void bionic_exit(int status)
+@@ -441,6 +441,15 @@ static void bionic_exit(int status)
      char where[200];
      describe_caller(__builtin_return_address(0), where, sizeof(where));
      tl_log_line("bionic: exit(%d) called from %s", status, where);
 +    if (status != 0) {
 +        /* what a Python app (Ren'Py, Kivy) was told about where it lives: its paths decide where it looks for its own files */
 +        static const char *const names[] = { "ANDROID_APK", "ANDROID_PRIVATE", "ANDROID_PUBLIC", "ANDROID_OLD_PUBLIC", "ANDROID_ARGUMENT",
-+                                             "ANDROID_ENTRYPOINT", "ANDROID_UNPACK", "ANDROID_EXPANSION", "PYTHONHOME", "PYTHONPATH",
-+                                             "ANDROID_PACK_FF1", "ANDROID_PACK_FF2", "ANDROID_PACK_FF3", "ANDROID_PACK_FF4" };
++                                             "ANDROID_ENTRYPOINT", "ANDROID_UNPACK", "ANDROID_EXPANSION", "PYTHONHOME", "PYTHONPATH" };
 +        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
 +            const char *v = getenv(names[i]);
 +            if (v) tl_log_line("bionic: env %s=%s", names[i], v);
@@ -51,7 +50,7 @@ index 072fdf9..482fc49 100644
      if (tl_guest_exit_hook) tl_guest_exit_hook(status);
      exit(status);
 diff --git a/src/translation-layer-next/husk-tl-unity-app.c b/src/translation-layer-next/husk-tl-unity-app.c
-index b0ce536..7eeda1e 100644
+index b0ce536..2efdf8f 100644
 --- a/src/translation-layer-next/husk-tl-unity-app.c
 +++ b/src/translation-layer-next/husk-tl-unity-app.c
 @@ -13,6 +13,7 @@
@@ -62,7 +61,7 @@ index b0ce536..7eeda1e 100644
  #include <unistd.h>
  #include <TargetConditionals.h>
  #if TARGET_OS_IPHONE
-@@ -248,6 +249,16 @@ static bool manifest_launcher_activity(const char *apk, const char *package, cha
+@@ -248,6 +249,90 @@ static bool manifest_launcher_activity(const char *apk, const char *package, cha
   * natives. Java recursion is C recursion in the interpreter, and class initialisation runs deep, so this runs on its own
   * thread with a big stack rather than on the launch thread.
   */
@@ -76,10 +75,84 @@ index b0ce536..7eeda1e 100644
 +    return yes;
 +}
 +
++/* Diagnosis for a Ren'Py game that cannot find its own files: after the game's main.py has been extracted (so from the second run on),
++   put a small block of Python into it that, when the script loader fails, prints what the loader sees (APK list, file counts, module list).
++   It goes after the "from __future__" line, because Python wants that first. The block is marked, so it is added once. */
++static const char k_py_trace[] =
++    "# HUSK-TRACE (added by Husk for diagnosis)\n"
++    "import sys as _hs, builtins as _hb\n"
++    "def _hdump():\n"
++    "    p = lambda *a: print(\"HUSKTRACE\", *a)\n"
++    "    try:\n"
++    "        import renpy, renpy.loader as L\n"
++    "        p(\"android\", renpy.android, \"renpy_base\", renpy.config.renpy_base, \"basedir\", renpy.config.basedir)\n"
++    "        p(\"apks\", [(getattr(a, \"prefix\", None), a in L.game_apks) for a in L.apks])\n"
++    "        p(\"game_files\", len(L.game_files), \"common_files\", len(L.common_files))\n"
++    "        p(\"callbacks\", [f.__name__ for f in L.scandirfiles_callbacks])\n"
++    "        p(\"common sample\", [repr(x) for x in L.common_files[:6]])\n"
++    "        p(\"errorhandling entries\", [repr(x) for x in L.common_files if \"errorhandling\" in repr(x)])\n"
++    "        for a in L.apks:\n"
++    "            i = getattr(a, \"info\", {})\n"
++    "            p(\"apk info\", getattr(a, \"prefix\", None), len(i), list(i)[:4])\n"
++    "        p(\"listdirfiles(common)\", len(list(L.listdirfiles(True, False))))\n"
++    "    except BaseException as e:\n"
++    "        p(\"dump failed\", repr(e))\n"
++    "_hold = _hb.__import__\n"
++    "_hdone = [False]\n"
++    "def _himp(name, *a, **k):\n"
++    "    m = _hold(name, *a, **k)\n"
++    "    if not _hdone[0]:\n"
++    "        s = _hs.modules.get(\"renpy.script\")\n"
++    "        S = getattr(s, \"Script\", None) if s else None\n"
++    "        if S is not None and hasattr(S, \"load_module\"):\n"
++    "            _hdone[0] = True\n"
++    "            _hlm = S.load_module\n"
++    "            def _lm(self, name, *aa, **kk):\n"
++    "                try:\n"
++    "                    return _hlm(self, name, *aa, **kk)\n"
++    "                except BaseException:\n"
++    "                    try:\n"
++    "                        print(\"HUSKTRACE load_module failed:\", name, \"module_files:\", len(self.module_files), [repr(x) for x in self.module_files[:8]])\n"
++    "                    except BaseException as e:\n"
++    "                        print(\"HUSKTRACE module_files unreadable\", repr(e))\n"
++    "                    _hdump()\n"
++    "                    raise\n"
++    "            S.load_module = _lm\n"
++    "    return m\n"
++    "_hb.__import__ = _himp\n";
++
++static void inject_python_trace(const char *data_dir)
++{
++    char path[1100];
++    snprintf(path, sizeof(path), "%s/files/main.py", data_dir);
++    FILE *f = fopen(path, "rb");
++    if (!f) { tl_log_line("python: %s is not there yet, the Python trace starts on the next run", path); return; }
++    fseek(f, 0, SEEK_END);
++    long n = ftell(f);
++    fseek(f, 0, SEEK_SET);
++    if (n <= 0 || n > (8L << 20)) { fclose(f); return; }
++    char *buf = malloc((size_t)n + 1);
++    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return; }
++    fclose(f);
++    buf[n] = 0;
++    if (strstr(buf, "# HUSK-TRACE")) { free(buf); return; }
++    char *at = strstr(buf, "from __future__ import");
++    char *eol = at ? strchr(at, '\n') : NULL;
++    size_t head = eol ? (size_t)(eol + 1 - buf) : 0;
++    FILE *w = fopen(path, "wb");
++    if (!w) { free(buf); return; }
++    fwrite(buf, 1, head, w);
++    fwrite(k_py_trace, 1, sizeof(k_py_trace) - 1, w);
++    fwrite(buf + head, 1, (size_t)n - head, w);
++    fclose(w);
++    free(buf);
++    tl_log_line("python: Python trace added to %s", path);
++}
++
  static void *java_boot(void *arg)
  {
      bool *ok = arg;
-@@ -338,6 +349,22 @@ static void *launch_thread(void *arg)
+@@ -338,6 +423,23 @@ static void *launch_thread(void *arg)
          tl_audio_install();
          ok = tl_gm_start(&cfg) && tl_gm_run();
      } else if (A.engine == ENGINE_JAVA) {
@@ -98,6 +171,7 @@ index b0ce536..7eeda1e 100644
 +                if (strcmp(rp, A.data)) tl_log_line("python: data path %s -> %s", A.data, rp);
 +                snprintf(A.data, sizeof(A.data), "%s", rp);
 +            }
++            inject_python_trace(A.data);
 +        }
          tl_log_line("java: starting %s as %s, %dx%d (runtime %s)", A.apk, A.package, A.width, A.height, g_java_root);
          ok = false;
